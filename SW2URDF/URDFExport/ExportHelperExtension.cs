@@ -239,6 +239,59 @@ namespace SW2URDF.URDFExport
         }
 
         /// <summary>
+        /// Builds a MassProperty2 for the given components, evaluated with respect to the given
+        /// coordinate system.
+        ///
+        /// This selects whole components rather than their Body2 bodies. That distinction matters:
+        /// bodies carry only geometry, so mass properties computed from them are always
+        /// volume * material density. Any values a user has assigned through
+        /// Tools > Mass Properties > Override Mass Properties live on the component's
+        /// configuration, not on its bodies, and are therefore silently discarded by the
+        /// body-based calculation. Selecting components makes SolidWorks report the same numbers
+        /// as its own Mass Properties dialog, overrides included.
+        ///
+        /// Returns null when this SolidWorks version or document cannot provide a MassProperty2,
+        /// in which case the caller falls back to the body-based calculation.
+        /// </summary>
+        /// <param name="components">Components to evaluate, child components included automatically</param>
+        /// <param name="coordinateSystemTransform">Coordinate system to evaluate against, or null for the document origin</param>
+        /// <returns>A recalculated IMassProperty2, or null if unavailable</returns>
+        private IMassProperty2 GetComponentsMassProperty(
+            List<Component2> components, MathTransform coordinateSystemTransform)
+        {
+            IMassProperty2 swMass = (IMassProperty2)ActiveSWModel.Extension.CreateMassProperty2();
+            if (swMass == null)
+            {
+                return null;
+            }
+
+            // Mass in kg and moments in kg*m^2 regardless of the document's unit system.
+            swMass.UseSystemUnits = true;
+
+            // The exporter hides components while exporting meshes, and users may keep an
+            // assembly-level display state that hides cosmetic parts. Those parts still have mass,
+            // and the body-based calculation this replaces always counted them.
+            swMass.IncludeHiddenBodiesOrComponents = true;
+
+            if (coordinateSystemTransform != null)
+            {
+                swMass.SetCoordinateSystem(coordinateSystemTransform);
+            }
+
+            // This must be a Component2[]. Passing an object[] of components fails the COM call
+            // with RPC_E_SERVERFAULT.
+            swMass.SelectedItems = components.ToArray();
+
+            if (!swMass.Recalculate())
+            {
+                throw new Exception("Failed to calculate mass properties of components " +
+                    string.Join(", ", components.Select(component => component.Name2)));
+            }
+
+            return swMass;
+        }
+
+        /// <summary>
         /// Gets the Moment of Inertia of specific component bodies with respect to the coordinate system.
         /// This reuses some code with other methods because creating the mass property has to happen every time
         /// </summary>
@@ -297,8 +350,57 @@ namespace SW2URDF.URDFExport
 
         private void ComputeInertialProperties(Link link)
         {
+            // A link without components has no mass. Neither SolidWorks API reports it that way:
+            // an empty selection makes both fall back to the whole document, which would give this
+            // link the mass and inertia of the entire robot.
+            if (link.SWComponents == null || link.SWComponents.Count == 0)
+            {
+                logger.Info("Link " + link.Name + " has no components, setting its inertial " +
+                    "properties to zero");
+                link.Inertial.Mass.Value = 0;
+                link.Inertial.Inertia.SetMomentMatrix(new double[9]);
+                link.Inertial.Origin.SetXYZ(new double[3] { 0, 0, 0 });
+                link.Inertial.Origin.SetRPY(new double[3] { 0, 0, 0 });
+                return;
+            }
+
             // Get the SolidWorks MathTransform that corresponds to the child coordinate system
             MathTransform jointTransform = GetCoordinateSystemTransform(link.Joint.CoordinateSystemName);
+
+            IMassProperty2 swMass = GetComponentsMassProperty(link.SWComponents, jointTransform);
+            if (swMass == null)
+            {
+                logger.Warn("MassProperty2 is unavailable for link " + link.Name +
+                    ", falling back to calculating mass properties from bodies. Mass properties " +
+                    "overridden in SolidWorks will not be reflected in the export.");
+                ComputeInertialPropertiesFromBodies(link, jointTransform);
+                return;
+            }
+
+            // Returned as double with values [Lxx, Lxy, Lxz, Lyx, Lyy, Lyz, Lzx, Lzy, Lzz], taken
+            // about the center of mass but oriented with the axes of the coordinate system set
+            // above. That is what URDF's inertia element expects.
+            double[] moment = (double[])swMass.GetMomentOfInertia(
+                (int)swMomentsOfInertiaReferenceFrame_e.swMomentsOfInertiaReferenceFrame_CenterOfMass);
+            link.Inertial.Inertia.SetMomentMatrix(moment);
+
+            link.Inertial.Mass.Value = swMass.Mass;
+
+            double[] centerOfMass = (double[])swMass.CenterOfMass;
+            link.Inertial.Origin.SetXYZ(centerOfMass);
+            link.Inertial.Origin.SetRPY(new double[3] { 0, 0, 0 });
+        }
+
+        /// <summary>
+        /// Computes a link's inertial properties from its bodies' geometry and material density.
+        ///
+        /// Kept only as a last resort for when MassProperty2 is unavailable. It is known to be
+        /// wrong in two ways: it cannot see mass properties the user has overridden in
+        /// SolidWorks, and for links built from a subassembly it misplaces the bodies, which
+        /// corrupts the center of mass and the moment of inertia.
+        /// </summary>
+        private void ComputeInertialPropertiesFromBodies(Link link, MathTransform jointTransform)
+        {
             List<Body2> bodies = GetBodies(link.SWComponents);
 
             double[] moment = GetComponentsMomentOfInertia(bodies, jointTransform);
