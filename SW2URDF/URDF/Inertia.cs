@@ -78,13 +78,24 @@ namespace SW2URDF.URDF
             Attributes.Add(IzzAttribute);
         }
 
+        /// <summary>
+        /// Sets this element from a row-major 3x3 tensor
+        /// [Lxx, Lxy, Lxz, Lyx, Lyy, Lyz, Lzx, Lzy, Lzz].
+        ///
+        /// The products of inertia are copied as-is. URDF uses the negative convention
+        /// (ixy = -integral of xy dm), and so does the moment of inertia the SolidWorks API
+        /// returns, so no sign change belongs here. Note that this is not the convention the
+        /// mass properties dialog displays: it defaults to "positive tensor notation", whose
+        /// off-diagonal terms are the negatives of these. Comparing an export against that
+        /// dialog is expected to show three flipped signs.
+        /// </summary>
         public void SetMomentMatrix(double[] array)
         {
             Ixx = array[0];
-            Ixy = -array[1];
-            Ixz = -array[2];
+            Ixy = array[1];
+            Ixz = array[2];
             Iyy = array[4];
-            Iyz = -array[5];
+            Iyz = array[5];
             Izz = array[8];
         }
 

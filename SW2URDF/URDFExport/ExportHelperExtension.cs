@@ -348,6 +348,27 @@ namespace SW2URDF.URDFExport
             return swMass.CenterOfMass;
         }
 
+        /// <summary>
+        /// The raw moment of inertia SolidWorks reports for a link, in the link's own coordinate
+        /// system, as ComputeInertialProperties requests it.
+        ///
+        /// Exists so tests can check the exported tensor against SolidWorks without duplicating
+        /// the coordinate system resolution, which for a subassembly has to reach into a
+        /// subcomponent and would make the comparison meaningless if it diverged.
+        /// </summary>
+        internal double[] GetLinkMomentOfInertiaForTest(Link link)
+        {
+            MathTransform jointTransform = GetCoordinateSystemTransform(link.Joint.CoordinateSystemName);
+            IMassProperty2 swMass = GetComponentsMassProperty(link.SWComponents, jointTransform);
+            if (swMass == null)
+            {
+                throw new Exception("MassProperty2 is unavailable for link " + link.Name);
+            }
+
+            return (double[])swMass.GetMomentOfInertia(
+                (int)swMomentsOfInertiaReferenceFrame_e.swMomentsOfInertiaReferenceFrame_CenterOfMass);
+        }
+
         private void ComputeInertialProperties(Link link)
         {
             // A link without components has no mass. Neither SolidWorks API reports it that way:
